@@ -1,9 +1,11 @@
 import fs from "fs";
 import path from "path";
 import { DatabaseSync } from "node:sqlite";
+import { setVolume } from "./load";
 
 const dbPath = path.join(process.cwd(), "data", "hold.db");
 const catalogPath = path.join(process.cwd(), "seed", "catalog.json");
+const revisionsPath = path.join(process.cwd(), "seed", "revisions.json");
 const IMAGE_CREDIT = "Photos: Free Exercise DB, public domain.";
 
 let db;
@@ -184,28 +186,35 @@ function migrate(database) {
   `);
 }
 
+function photoNote(exercise) {
+  if (exercise.photo_note) return exercise.photo_note;
+  if (exercise.images?.length) return IMAGE_CREDIT;
+  return "";
+}
+
 function seed(database) {
   const existing = database.prepare("SELECT COUNT(*) AS n FROM profile").get();
-  if (existing.n > 0) return;
   const catalog = JSON.parse(fs.readFileSync(catalogPath, "utf8"));
   const insertEx = database.prepare(`
-    INSERT INTO exercises (
+    INSERT OR IGNORE INTO exercises (
       id, name, category, steps_json, photo_note, images_json, equipment, level, force, mechanic,
       muscles_json, secondary_json, tags_json, unilateral, custom
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
   `);
   database.exec("BEGIN");
-  database.prepare(`
-    INSERT INTO profile (id, name, age, unit)
-    VALUES (1, 'You', NULL, 'lb')
-  `).run();
+  if (existing.n === 0) {
+    database.prepare(`
+      INSERT INTO profile (id, name, age, unit)
+      VALUES (1, 'You', NULL, 'lb')
+    `).run();
+  }
   for (const exercise of catalog) {
     insertEx.run(
       exercise.id,
       exercise.name,
       exercise.category || "",
       JSON.stringify(exercise.steps || []),
-      IMAGE_CREDIT,
+      photoNote(exercise),
       JSON.stringify(exercise.images || []),
       exercise.equipment || "",
       exercise.level || "",
@@ -217,7 +226,79 @@ function seed(database) {
       exercise.unilateral ? 1 : 0,
     );
   }
+  // Pictures and muscles cannot be edited in Hold, so they follow the catalog.
+  const syncCatalog = database.prepare(`
+    UPDATE exercises
+    SET images_json = ?, photo_note = ?, muscles_json = ?, secondary_json = ?, tags_json = ?
+    WHERE id = ? AND custom = 0
+      AND (images_json IS NOT ? OR photo_note IS NOT ? OR muscles_json IS NOT ?
+        OR secondary_json IS NOT ? OR tags_json IS NOT ?)
+  `);
+  for (const exercise of catalog) {
+    const values = [
+      JSON.stringify(exercise.images || []),
+      photoNote(exercise),
+      JSON.stringify(exercise.muscles || []),
+      JSON.stringify(exercise.secondary || []),
+      JSON.stringify(exercise.muscles || []),
+    ];
+    syncCatalog.run(...values, exercise.id, ...values);
+  }
+  // Name, steps, and equipment can be edited. A reviewed fix replaces them only
+  // while the row still holds the text the fix replaced.
+  const revisions = readRevisions();
+  const current = database.prepare("SELECT name, steps_json, equipment FROM exercises WHERE id = ? AND custom = 0");
+  const revise = {
+    name: database.prepare("UPDATE exercises SET name = ? WHERE id = ?"),
+    steps: database.prepare("UPDATE exercises SET steps_json = ? WHERE id = ?"),
+    equipment: database.prepare("UPDATE exercises SET equipment = ? WHERE id = ?"),
+  };
+  for (const exercise of catalog) {
+    const past = revisions[exercise.id];
+    const row = past && current.get(exercise.id);
+    if (!row) continue;
+    const stored = { name: row.name, steps: sameSteps(row.steps_json), equipment: row.equipment || "" };
+    const next = {
+      name: exercise.name,
+      steps: JSON.stringify(exercise.steps || []),
+      equipment: exercise.equipment || "",
+    };
+    for (const field of Object.keys(revise)) {
+      if (!past[field] || stored[field] === next[field]) continue;
+      const replaced = past[field].map((value) => (field === "steps" ? JSON.stringify(value || []) : value || ""));
+      if (replaced.includes(stored[field])) revise[field].run(next[field], exercise.id);
+    }
+  }
+  // A movement listed twice keeps one row. The other goes unless a routine or
+  // a logged session points at it.
+  const ids = new Set(catalog.map((exercise) => exercise.id));
+  const removeStale = database.prepare(`
+    DELETE FROM exercises
+    WHERE id = ? AND custom = 0
+      AND NOT EXISTS (SELECT 1 FROM template_items WHERE exercise_id = exercises.id)
+      AND NOT EXISTS (SELECT 1 FROM session_exercises WHERE exercise_id = exercises.id)
+  `);
+  for (const row of database.prepare("SELECT id FROM exercises WHERE custom = 0").all()) {
+    if (!ids.has(row.id)) removeStale.run(row.id);
+  }
   database.exec("COMMIT");
+}
+
+// Steps written by an older build may differ only in JSON spacing.
+function sameSteps(json) {
+  try {
+    return JSON.stringify(JSON.parse(json || "[]"));
+  } catch {
+    return json;
+  }
+}
+
+function readRevisions() {
+  try {
+    return JSON.parse(fs.readFileSync(revisionsPath, "utf8"));
+  } catch {
+    return {};
+  }
 }
 
 export function getDb() {
@@ -254,15 +335,17 @@ export function listExercises() {
 
 export function listExerciseCards() {
   return getDb().prepare(`
-    SELECT id, name, category, equipment, level, muscles_json, images_json, unilateral, custom, video_id
+    SELECT id, name, category, equipment, level, muscles_json, secondary_json, images_json, unilateral, custom, video_id
     FROM exercises ORDER BY name COLLATE NOCASE
   `).all().map((row) => {
     const item = plain(row);
     item.muscles = JSON.parse(item.muscles_json || "[]");
+    item.secondary = JSON.parse(item.secondary_json || "[]");
     item.images = JSON.parse(item.images_json || "[]");
     item.unilateral = Boolean(item.unilateral);
     item.custom = Boolean(item.custom);
     delete item.muscles_json;
+    delete item.secondary_json;
     delete item.images_json;
     return item;
   });
@@ -586,7 +669,7 @@ export function skipExercise(id, skipped) {
 }
 
 export function listSessions() {
-  return getDb().prepare(`
+  const sessions = getDb().prepare(`
     SELECT s.*,
       (SELECT COUNT(*) FROM session_sets ss
         JOIN session_exercises se ON se.id = ss.session_exercise_id
@@ -594,6 +677,22 @@ export function listSessions() {
     FROM sessions s
     ORDER BY s.started_at DESC
   `).all().map(plain);
+  const volume = volumeBySession();
+  return sessions.map((session) => ({ ...session, load: volume.get(session.id) || 0 }));
+}
+
+function volumeBySession() {
+  const rows = getDb().prepare(`
+    SELECT se.session_id, ss.weight, ss.reps, ss.weight_r, ss.reps_r
+    FROM session_sets ss
+    JOIN session_exercises se ON se.id = ss.session_exercise_id
+    WHERE ss.done = 1
+  `).all();
+  const volume = new Map();
+  for (const row of rows) {
+    volume.set(row.session_id, (volume.get(row.session_id) || 0) + (setVolume(row) || 0));
+  }
+  return volume;
 }
 
 export function deleteSession(id) {
@@ -685,33 +784,62 @@ export function deleteNote(id) {
   return { id };
 }
 
-export function growth() {
-  const rows = getDb().prepare(`
-    SELECT e.id AS exercise_id, e.name, s.started_at, ss.weight, ss.reps, ss.weight_r, ss.reps_r, ss.done
+function loadPoint(row) {
+  const load = bestLoad(row);
+  return {
+    exerciseId: row.exercise_id,
+    name: row.name,
+    sessionId: row.session_id,
+    at: row.started_at,
+    weight: load.weight,
+    reps: load.reps,
+    volume: setVolume(row),
+    e1rm: load.weight && load.reps ? Math.round(load.weight * (1 + load.reps / 30) * 10) / 10 : null,
+  };
+}
+
+function loadRows(extraSql = "", params = []) {
+  return getDb().prepare(`
+    SELECT e.id AS exercise_id, e.name, s.id AS session_id, s.started_at,
+           ss.weight, ss.reps, ss.weight_r, ss.reps_r
     FROM session_sets ss
     JOIN session_exercises se ON se.id = ss.session_exercise_id
     JOIN sessions s ON s.id = se.session_id
     JOIN exercises e ON e.id = se.exercise_id
-    WHERE ss.done = 1 AND (ss.weight IS NOT NULL OR ss.weight_r IS NOT NULL OR ss.reps IS NOT NULL)
-    ORDER BY s.started_at
-  `).all().map(plain);
+    WHERE ss.done = 1 AND (ss.weight IS NOT NULL OR ss.weight_r IS NOT NULL)
+    ${extraSql}
+    ORDER BY s.started_at DESC
+  `).all(...params).map(plain);
+}
+
+export function exerciseLoads(exerciseId) {
+  return loadRows("AND e.id = ?", [exerciseId]).map(loadPoint);
+}
+
+export function latestLoads(exceptSessionId = null) {
+  const latest = {};
+  for (const row of loadRows()) {
+    if (exceptSessionId != null && Number(row.session_id) === Number(exceptSessionId)) continue;
+    if (latest[row.exercise_id]) continue;
+    latest[row.exercise_id] = loadPoint(row);
+  }
+  return latest;
+}
+
+export function growth() {
+  const rows = loadRows().slice().reverse();
   const byExercise = new Map();
   for (const row of rows) {
     const entry = byExercise.get(row.exercise_id) || { id: row.exercise_id, name: row.name, points: [] };
-    const load = bestLoad(row);
-    entry.points.push({
-      at: row.started_at,
-      weight: load.weight,
-      reps: load.reps,
-      e1rm: load.weight && load.reps ? Math.round(load.weight * (1 + load.reps / 30) * 10) / 10 : null,
-    });
+    entry.points.push(loadPoint(row));
     byExercise.set(row.exercise_id, entry);
   }
   return [...byExercise.values()].map((entry) => {
     const weighted = entry.points.filter((point) => point.weight);
     const best = weighted.reduce((top, point) => (point.weight > (top?.weight || 0) ? point : top), null);
     const bestE1 = entry.points.reduce((top, point) => ((point.e1rm || 0) > (top?.e1rm || 0) ? point : top), null);
-    return { ...entry, best, bestE1, last: entry.points[entry.points.length - 1] };
+    const totalVolume = entry.points.reduce((sum, point) => sum + (point.volume || 0), 0);
+    return { ...entry, best, bestE1, totalVolume, last: entry.points[entry.points.length - 1] };
   }).sort((a, b) => a.name.localeCompare(b.name));
 }
 

@@ -2,7 +2,8 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { ExerciseEditor } from "@/components/ExerciseEditor";
 import { VideoButton } from "@/components/VideoButton";
-import { getExercise } from "@/lib/db";
+import { exerciseLoads, getExercise, profile } from "@/lib/db";
+import { formatVolume } from "@/lib/load";
 
 export const dynamic = "force-dynamic";
 
@@ -10,6 +11,8 @@ export default async function ExercisePage({ params }) {
   const { slug } = await params;
   const exercise = getExercise(slug);
   if (!exercise) notFound();
+  const loads = exerciseLoads(exercise.id);
+  const unit = profile().unit || "lb";
   const equipment = !exercise.equipment || exercise.equipment === "body only" ? "Bodyweight" : exercise.equipment;
   return (
     <div className="stack">
@@ -39,6 +42,25 @@ export default async function ExercisePage({ params }) {
           ))}
         </div>
       ) : <p className="muted">No photo for this one. The steps are the guide.</p>}
+      <div className="card stack">
+        <h3>Your loads</h3>
+        {loads.length ? (
+          <table className="table">
+            <thead><tr><th>When</th><th>Load</th><th>Reps</th><th>Volume</th><th>e1RM</th></tr></thead>
+            <tbody>
+              {loads.slice(0, 12).map((point, index) => (
+                <tr key={`${point.at}-${index}`}>
+                  <td>{new Date(point.at).toLocaleDateString()}</td>
+                  <td>{point.weight ?? "—"} {unit}</td>
+                  <td>{point.reps ?? "—"}</td>
+                  <td>{formatVolume(point.volume, unit) || "—"}</td>
+                  <td>{point.e1rm ?? "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : <p className="muted">No weight logged for this exercise yet. Log a set with a load and it stays here.</p>}
+      </div>
       <div className="card">
         <h3>How to do it</h3>
         <ol className="steps">{exercise.steps.map((step) => <li key={step}>{step}</li>)}</ol>
@@ -49,7 +71,7 @@ export default async function ExercisePage({ params }) {
           {exercise.for_you ? <div className="callout good"><strong>Your note</strong>{exercise.for_you}</div> : null}
         </div>
       ) : null}
-      <p className="faint">{exercise.photo_note || "Photos: Free Exercise DB, public domain."} A YouTube link, if you add one, streams inside Hold.</p>
+      <p className="faint">{exercise.photo_note ? `${exercise.photo_note} ` : ""}A YouTube link, if you add one, streams inside Hold.</p>
       <ExerciseEditor exercise={exercise} />
     </div>
   );

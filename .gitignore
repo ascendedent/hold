@@ -2,3 +2,14 @@ node_modules
 .next
 data/*.db
 data/*.db-*
+mobile/ios
+mobile/android
+mobile/.expo
+mobile/*.log
+mobile/assets/catalog.json
+
+# Yours alone: your plan, the copy the phone build bundles, and your Mac's details.
+personal/
+mobile/assets/personal.json
+scripts/mac.env
+__pycache__/

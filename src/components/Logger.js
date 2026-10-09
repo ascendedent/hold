@@ -4,6 +4,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { VideoButton } from "./VideoButton";
 import { api } from "./api";
+import { equipmentLabel } from "@/lib/catalog";
+import { formatVolume, setVolume } from "@/lib/load";
 
 function unitLabel(unit) {
   if (unit === "sec") return "Seconds";
@@ -11,7 +13,7 @@ function unitLabel(unit) {
   return "Reps";
 }
 
-export function Logger({ session, unit, catalog }) {
+export function Logger({ session, unit, catalog, priorLoads = {} }) {
   const router = useRouter();
   const [exercises, setExercises] = useState(session.exercises);
   const exercisesRef = useRef(exercises);
@@ -109,11 +111,15 @@ export function Logger({ session, unit, catalog }) {
   }
 
   const doneCount = active.filter((exercise) => exercise.sets.length && exercise.sets.every((set) => set.done)).length;
+  const workoutLoad = exercises.reduce((sum, exercise) => (
+    sum + exercise.sets.reduce((inner, set) => inner + (set.done ? (setVolume(set) || 0) : 0), 0)
+  ), 0);
+  const previous = current ? priorLoads[current.exercise_id] : null;
 
   return (
     <div className="stack">
       <div className="spread">
-        <p className="muted" style={{ margin: 0 }}>{doneCount} of {active.length} exercises logged · {unit}</p>
+        <p className="muted" style={{ margin: 0 }}>{doneCount} of {active.length} exercises logged · Load {formatVolume(workoutLoad, unit) || `0 ${unit}`}</p>
         <div className="row">
           <button type="button" className={`chip ${meta.energy === "good" ? "active" : ""}`} onClick={() => saveMeta({ energy: "good" })}>Good day</button>
           <button type="button" className={`chip ${meta.energy === "low" ? "active" : ""}`} onClick={() => saveMeta({ energy: "low" })}>Low day</button>
@@ -132,6 +138,7 @@ export function Logger({ session, unit, catalog }) {
             <div>
               <h2>{current.name}</h2>
               <p className="muted">{current.dose}{current.equipment ? ` · ${pretty(current.equipment)}` : ""}</p>
+              <p className="faint">{previous?.weight ? `Previous load ${previous.weight} ${unit} × ${previous.reps ?? "—"}` : "No load logged for this movement yet."}</p>
             </div>
             {current.video_id ? <VideoButton videoId={current.video_id} title={current.video_title || current.name} /> : null}
           </div>
@@ -152,23 +159,26 @@ export function Logger({ session, unit, catalog }) {
           ) : null}
           <div className="stack">
             {current.sets.map((set) => (
-              <div className={current.unilateral ? "set uni" : "set"} key={set.id}>
+              <div key={set.id} className="stack" style={{ gap: 4 }}>
+              <div className={current.unilateral ? "set uni" : "set"}>
                 <span className="idx">{set.set_index}</span>
                 {current.unilateral ? (
                   <>
-                    <label>L {unit}<input value={set.weight ?? ""} onChange={(event) => updateSet(current.id, set.id, "weight", event.target.value)} onBlur={() => persistSet(setFrom(exercisesRef.current, current.id, set.id))} /></label>
+                    <label>L load, {unit}<input inputMode="decimal" value={set.weight ?? ""} onChange={(event) => updateSet(current.id, set.id, "weight", event.target.value)} onBlur={() => persistSet(setFrom(exercisesRef.current, current.id, set.id))} /></label>
                     <label>L {unitLabel(current.effort_unit)}<input value={set.reps ?? ""} onChange={(event) => updateSet(current.id, set.id, "reps", event.target.value)} onBlur={() => persistSet(setFrom(exercisesRef.current, current.id, set.id))} /></label>
-                    <label>R {unit}<input value={set.weight_r ?? ""} onChange={(event) => updateSet(current.id, set.id, "weight_r", event.target.value)} onBlur={() => persistSet(setFrom(exercisesRef.current, current.id, set.id))} /></label>
+                    <label>R load, {unit}<input inputMode="decimal" value={set.weight_r ?? ""} onChange={(event) => updateSet(current.id, set.id, "weight_r", event.target.value)} onBlur={() => persistSet(setFrom(exercisesRef.current, current.id, set.id))} /></label>
                     <label>R {unitLabel(current.effort_unit)}<input value={set.reps_r ?? ""} onChange={(event) => updateSet(current.id, set.id, "reps_r", event.target.value)} onBlur={() => persistSet(setFrom(exercisesRef.current, current.id, set.id))} /></label>
                   </>
                 ) : (
                   <>
-                    <label>{unit}<input value={set.weight ?? ""} onChange={(event) => updateSet(current.id, set.id, "weight", event.target.value)} onBlur={() => persistSet(setFrom(exercisesRef.current, current.id, set.id))} /></label>
+                    <label>Load, {unit}<input inputMode="decimal" value={set.weight ?? ""} onChange={(event) => updateSet(current.id, set.id, "weight", event.target.value)} onBlur={() => persistSet(setFrom(exercisesRef.current, current.id, set.id))} /></label>
                     <label>{unitLabel(current.effort_unit)}<input value={set.reps ?? ""} onChange={(event) => updateSet(current.id, set.id, "reps", event.target.value)} onBlur={() => persistSet(setFrom(exercisesRef.current, current.id, set.id))} /></label>
                   </>
                 )}
                 <label>Reps left<input value={set.rir ?? ""} onChange={(event) => updateSet(current.id, set.id, "rir", event.target.value)} onBlur={() => persistSet(setFrom(exercisesRef.current, current.id, set.id))} /></label>
                 <button className={set.done ? "btn good" : "btn accent"} type="button" onClick={() => toggleDone(current, setFrom(exercises, current.id, set.id))}>{set.done ? "Logged" : "Log"}</button>
+              </div>
+              <p className="faint" style={{ margin: 0 }}>{setVolume(set) ? `Set load ${formatVolume(setVolume(set), unit)}` : "Enter the load and the reps. Log keeps both."}</p>
               </div>
             ))}
           </div>
@@ -219,8 +229,7 @@ export function Logger({ session, unit, catalog }) {
 }
 
 function pretty(value) {
-  if (!value || value === "body only") return "Bodyweight";
-  return value;
+  return equipmentLabel(value);
 }
 
 function setFrom(exercises, exerciseId, setId) {

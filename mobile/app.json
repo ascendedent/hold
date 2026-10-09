@@ -1,0 +1,38 @@
+{
+  "expo": {
+    "name": "Hold",
+    "slug": "hold",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "scheme": "hold",
+    "userInterfaceStyle": "dark",
+    "backgroundColor": "#090b10",
+    "newArchEnabled": true,
+    "ios": {
+      "bundleIdentifier": "com.ascendedent.hold",
+      "supportsTablet": false,
+      "appleTeamId": "GV5YN8MSGY",
+      "buildNumber": "1",
+      "icon": "./assets/icon.png",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false,
+        "UIStatusBarStyle": "UIStatusBarStyleLightContent"
+      }
+    },
+    "plugins": [
+      "expo-router",
+      "expo-sqlite",
+      [
+        "expo-splash-screen",
+        {
+          "backgroundColor": "#090b10",
+          "image": "./assets/splash.png",
+          "imageWidth": 180
+        }
+      ],
+      "./plugins/with-ios-scene-lifecycle",
+      "./plugins/with-local-notifications"
+    ]
+  }
+}
